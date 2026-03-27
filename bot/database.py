@@ -59,6 +59,8 @@ async def init_db() -> None:
         await _ensure_column(db, "orders", "drink_subtotal", "INTEGER")
         await _ensure_column(db, "orders", "preparation_comment", "TEXT NOT NULL DEFAULT ''")
         await _ensure_column(db, "orders", "payment_claimed", "INTEGER NOT NULL DEFAULT 0")
+        await _ensure_column(db, "orders", "drinks_json", "TEXT NOT NULL DEFAULT '[]'")
+        await _ensure_column(db, "orders", "drinks_subtotal", "INTEGER NOT NULL DEFAULT 0")
 
         await db.commit()
 
@@ -167,6 +169,65 @@ async def create_order(
         return int(cursor.lastrowid)
 
 
+async def create_order_multi_drinks(
+    *,
+    telegram_user_id: int,
+    telegram_username: str | None,
+    drinks: list[dict],
+    ready_time: str,
+    preparation_comment: str,
+    extras: list[dict],
+    total_price: int,
+) -> int:
+    """Сохраняет заказ с несколькими напитками в БД и возвращает его id."""
+    drinks_json = json.dumps(drinks, ensure_ascii=False)
+    extras_json = json.dumps(extras, ensure_ascii=False)
+    preparation_comment = (preparation_comment or "").strip()
+    drinks_subtotal = sum(int(d.get("price", 0)) for d in drinks)
+    
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO orders (
+                telegram_user_id,
+                telegram_username,
+                drink_key,
+                drink_name,
+                size_key,
+                size_ml,
+                ready_time,
+                drink_subtotal,
+                drinks_json,
+                drinks_subtotal,
+                preparation_comment,
+                extras_json,
+                price,
+                status,
+                payment_claimed,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_payment', 0, ?)
+            """,
+            (
+                telegram_user_id,
+                telegram_username,
+                drinks[0].get("key", "") if drinks else "",
+                drinks[0].get("name", "") if drinks else "",
+                drinks[0].get("size_key", "") if drinks else "",
+                drinks[0].get("size_ml", 0) if drinks else 0,
+                ready_time,
+                drinks[0].get("price", 0) if drinks else 0,
+                drinks_json,
+                drinks_subtotal,
+                preparation_comment,
+                extras_json,
+                total_price,
+                _utc_now_iso(),
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
+
+
 def parse_extras_json(row: dict) -> list[dict]:
     raw = row.get("extras_json") or "[]"
     if not isinstance(raw, str):
@@ -178,8 +239,20 @@ def parse_extras_json(row: dict) -> list[dict]:
         return []
 
 
+def parse_drinks_json(row: dict) -> list[dict]:
+    """Парсит drinks_json из заказа. Возвращает список напитков."""
+    raw = row.get("drinks_json") or "[]"
+    if not isinstance(raw, str):
+        return []
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
 async def get_order(order_id: int) -> dict[str, object] | None:
-    """Возвращает заказ по id (extras_json остаётся строкой; при необходимости парсите через _parse_extras)."""
+    """Возвращает заказ по id (extras_json и drinks_json остаются строками; при необходимости парсите через parse_extras_json/parse_drinks_json)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
@@ -254,11 +327,17 @@ async def barista_reject_payment_claim(order_id: int) -> bool:
 
 
 def order_drink_subtotal(order_row: dict) -> int:
-    """Сумма только напитка (для старых строк без drink_subtotal)."""
+    """Сумма только напитка(ов) (для старых строк без drink_subtotal или новых с drinks_subtotal)."""
+    # Сначала проверяем новое поле drinks_subtotal
+    drinks_subtotal = order_row.get("drinks_subtotal")
+    if drinks_subtotal is not None and drinks_subtotal != "" and int(drinks_subtotal) > 0:
+        return int(drinks_subtotal)
+    
+    # Затем проверяем старое поле drink_subtotal
     ds = order_row.get("drink_subtotal")
     if ds is not None and ds != "":
         try:
             return int(ds)
         except (TypeError, ValueError):
             pass
-    return int(order_row["price"])
+    return int(order_row.get("price", 0))
