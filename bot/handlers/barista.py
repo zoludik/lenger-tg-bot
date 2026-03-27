@@ -1,13 +1,4 @@
-from __future__ import annotations
-
-import os
-import re
-
-from aiogram import Bot, F, Router
-from aiogram.filters import Command
-from aiogram.types import CallbackQuery, Message
-
-from database import (
+from bot.database import (
     parse_extras_json,
     add_snack,
     barista_confirm_payment,
@@ -17,8 +8,8 @@ from database import (
     list_all_snacks_barista,
     order_drink_subtotal,
 )
-from keyboards import kb_barista_payment_review
 
+from bot.keyboards import kb_barista_payment_review
 router = Router(name="barista")
 
 ADD_SNACK_RE = re.compile(r"^\s*(\d+)\s+(.+)$")
