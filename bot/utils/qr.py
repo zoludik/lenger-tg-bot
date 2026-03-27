@@ -1,6 +1,6 @@
-from __future__ import annotations
+from bot.__future__ import annotations
 
-from io import BytesIO
+from bot.io import BytesIO
 
 import qrcode
 
