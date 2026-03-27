@@ -1,15 +1,14 @@
 import asyncio
 import os
-from bot.pathlib import Path
+from pathlib import Path
 
-from bot.aiogram import Bot, Dispatcher
-from bot.aiogram.fsm.storage.memory import MemoryStorage
-from botdotenv import load_dotenv
+from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
+from dotenv import load_dotenv
 
 from bot.database import init_db
 from bot.handlers.client import router as client_router
 from bot.handlers.barista import router as barista_router
-
 
 async def main() -> None:
     # Загружаем переменные окружения из `bot/.env`
