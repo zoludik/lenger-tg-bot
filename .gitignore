@@ -1,0 +1,5 @@
+bot/.env
+bot/orders.db
+__pycache__/
+*.pyc
+.venv/
