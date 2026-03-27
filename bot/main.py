@@ -1,14 +1,14 @@
 import asyncio
 import os
-from pathlib import Path
+from bot.pathlib import Path
 
-from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
-from dotenv import load_dotenv
+from bot.aiogram import Bot, Dispatcher
+from bot.aiogram.fsm.storage.memory import MemoryStorage
+from botdotenv import load_dotenv
 
-from database import init_db
-from handlers.client import router as client_router
-from handlers.barista import router as barista_router
+from bot.database import init_db
+from bot.handlers.client import router as client_router
+from bot.handlers.barista import router as barista_router
 
 
 async def main() -> None:
