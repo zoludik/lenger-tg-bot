@@ -1,8 +1,8 @@
-from __future__ import annotations
+from bot.__future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from pathlib import Path
+from bot.datetime import datetime, timezone
+from bot.pathlib import Path
 
 import aiosqlite
 
