@@ -1,4 +1,4 @@
-from aiogram.fsm.state import State, StatesGroup
+from bot.aiogram.fsm.state import State, StatesGroup
 
 
 class OrderStates(StatesGroup):
