@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 
 
 # Категории и напитки (ключ = используемое значение в колбэках и БД)
@@ -133,12 +133,22 @@ def kb_main() -> InlineKeyboardMarkup:
     )
 
 
+def kb_start_panel() -> ReplyKeyboardMarkup:
+    """Нижняя панель с кнопкой 'Начать' вместо ввода /start."""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="Начать")]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+
+
 def kb_order_builder() -> InlineKeyboardMarkup:
     """Меню конструктора: клиент поэтапно собирает заказ."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Добавить напиток", callback_data="builder_add_coffee")],
             [InlineKeyboardButton(text="Добавить еду", callback_data="builder_add_food")],
+            [InlineKeyboardButton(text="Удалить позицию", callback_data="builder_delete_food")],
             [InlineKeyboardButton(text="Завершить заказ", callback_data="builder_finish")],
         ]
     )
