@@ -1,8 +1,7 @@
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart, StateFilter
@@ -34,8 +33,9 @@ from states import OrderStates
 
 router = Router(name="client")
 
-# Астана / Алматы: GMT+5
-ASTANA_TZ = ZoneInfo("Asia/Almaty")
+# Астана: фиксированный GMT+5 (не зависит от tzdata на сервере)
+ASTANA_TZ = timezone(timedelta(hours=5))
+DEFAULT_KASPI_URL = "https://pay.kaspi.kz/pay/h8xmix5d"
 
 # Текст-инструкция, который показывает бот перед началом оформления
 WELCOME_TEXT = (
@@ -56,6 +56,7 @@ PREP_PHOTO_2_PATH = str(ASSETS_DIR / "menu_2.png")
 
 
 def _now_astana() -> datetime:
+    """Текущее время в Астане (GMT+5)."""
     return datetime.now(ASTANA_TZ)
 
 
@@ -682,7 +683,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         except Exception:
             pass
 
-    kaspi_url = (os.getenv("KASPI_PAY_URL") or "https://pay.example.com/kaspi").strip()
+    kaspi_url = (os.getenv("KASPI_PAY_URL") or DEFAULT_KASPI_URL).strip()
     text = (
         f"Заказ №{order_id}\n"
         f"Сумма к оплате в Kaspi: {total} ₸\n\n"
@@ -690,7 +691,7 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         "Откройте ссылку, введите сумму вручную в приложении Kaspi.\n"
         "После оплаты нажмите «Я оплатил (Kaspi)» — бариста проверит платёж."
     )
-    await callback.message.answer(text, reply_markup=kb_paid(order_id))
+    await callback.message.answer(text, reply_markup=kb_paid(order_id), disable_web_page_preview=False)
 
 
 @router.callback_query(F.data.startswith("paid:"))
