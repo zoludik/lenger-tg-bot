@@ -2,16 +2,12 @@ import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    BufferedInputFile,
-    CallbackQuery,
-    FSInputFile,
-    Message,
-)
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from database import claim_payment_by_client, create_order, list_active_snacks
 from handlers.barista import notify_barista_payment_pending
@@ -34,18 +30,20 @@ from keyboards import (
     kb_cart_delete,
 )
 from states import OrderStates
-from utils.qr import make_qr_bytes
 
 
 router = Router(name="client")
+
+# Астана / Алматы: GMT+5
+ASTANA_TZ = ZoneInfo("Asia/Almaty")
 
 # Текст-инструкция, который показывает бот перед началом оформления
 WELCOME_TEXT = (
     "Как я работаю:\n"
     "1) Нажмите кнопку «Сделать заказ».\n"
-    "2) Выберите время, когда вам удобно забрать напиток.\n"
-    "3) В конструкторе соберите заказ: любое количество напитков и еды с витрины.\n"
-    "4) В конце получите QR для Kaspi, оплатите и нажмите «Я оплатил (Kaspi)».\n\n"
+    "2) Выберите время, когда вам удобно забрать заказ (время Астаны, GMT+5).\n"
+    "3) В конструкторе соберите заказ: любое количество напитков и/или еды с витрины.\n"
+    "4) В конце получите ссылку для оплаты в Kaspi и нажмите «Я оплатил (Kaspi)».\n\n"
     "После подтверждения оплаты бариста получит ваш заказ и комментарий по приготовлению (если вы его оставите)."
 )
 
@@ -56,10 +54,16 @@ ASSETS_DIR = Path(__file__).resolve().parents[1] / "assets"
 PREP_PHOTO_1_PATH = str(ASSETS_DIR / "menu_1.png")
 PREP_PHOTO_2_PATH = str(ASSETS_DIR / "menu_2.png")
 
-async def bot_send_menu_photos(*, bot: Bot, chat_id: int) -> None:
-    """Отправляет 2 фото меню клиенту."""
-    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_1_PATH))
-    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_2_PATH))
+
+def _now_astana() -> datetime:
+    return datetime.now(ASTANA_TZ)
+
+
+async def bot_send_menu_photos(*, bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Отправляет 2 фото меню и сохраняет их message_id, чтобы потом удалить."""
+    p1 = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_1_PATH))
+    p2 = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_2_PATH))
+    await state.update_data(menu_photo_ids=[int(p1.message_id), int(p2.message_id)])
 
 
 def parse_hhmm(text: str) -> str | None:
@@ -500,7 +504,7 @@ async def choose_ready_time(callback: CallbackQuery, state: FSMContext, bot: Bot
         await callback.message.answer("Некорректный выбор времени. Попробуйте снова.")
         return
 
-    ready_dt = datetime.now() + timedelta(minutes=minutes)
+    ready_dt = _now_astana() + timedelta(minutes=minutes)
     ready_time = ready_dt.strftime("%H:%M")
 
     # Проверка: время приготовления только в диапазоне 08:00–22:00.
@@ -520,7 +524,7 @@ async def choose_ready_time(callback: CallbackQuery, state: FSMContext, bot: Bot
     await state.update_data(ready_time=ready_time, ready_label=ready_label)
     await state.set_state(OrderStates.waiting_for_builder)
     # После настройки времени: 2 фото меню + стандартное окно конструктора.
-    await bot_send_menu_photos(bot=bot, chat_id=callback.message.chat.id)
+    await bot_send_menu_photos(bot=bot, chat_id=callback.message.chat.id, state=state)
     await _show_builder_menu(callback.message, state)
 
 
@@ -550,7 +554,7 @@ async def manual_ready_time_input(message: Message, state: FSMContext, bot: Bot)
 
     await state.update_data(ready_time=ready_time, ready_label="Указано вручную")
     await state.set_state(OrderStates.waiting_for_builder)
-    await bot_send_menu_photos(bot=bot, chat_id=message.chat.id)
+    await bot_send_menu_photos(bot=bot, chat_id=message.chat.id, state=state)
     await _show_builder_menu(message, state)
 
 
@@ -664,30 +668,29 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         total_price=total,
     )
 
+    menu_photo_ids = list(data.get("menu_photo_ids") or [])
     await state.clear()
-    # Удаляем сообщение с подтверждением заказа (summary), чтобы не захламлять чат.
+
+    # Удаляем summary и фото меню после завершения заказа.
     try:
         await callback.message.delete()
     except Exception:
         pass
+    for mid in menu_photo_ids:
+        try:
+            await bot.delete_message(chat_id=callback.message.chat.id, message_id=int(mid))
+        except Exception:
+            pass
 
-    # Ссылка Kaspi (клиент вводит сумму вручную в приложении). QR кодирует только эту ссылку.
     kaspi_url = (os.getenv("KASPI_PAY_URL") or "https://pay.example.com/kaspi").strip()
-    qr_png = make_qr_bytes(kaspi_url)
-    qr_file = BufferedInputFile(qr_png, filename=f"order_{order_id}_kaspi.png")
-
-    caption = (
+    text = (
         f"Заказ №{order_id}\n"
         f"Сумма к оплате в Kaspi: {total} ₸\n\n"
-        "Отсканируйте QR и введите эту сумму вручную в приложении Kaspi.\n"
+        f"Ссылка для оплаты:\n{kaspi_url}\n\n"
+        "Откройте ссылку, введите сумму вручную в приложении Kaspi.\n"
         "После оплаты нажмите «Я оплатил (Kaspi)» — бариста проверит платёж."
     )
-
-    await callback.message.answer_photo(
-        photo=qr_file,
-        caption=caption,
-        reply_markup=kb_paid(order_id),
-    )
+    await callback.message.answer(text, reply_markup=kb_paid(order_id))
 
 
 @router.callback_query(F.data.startswith("paid:"))
