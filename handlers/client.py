@@ -11,9 +11,12 @@ from aiogram.types import CallbackQuery, FSInputFile, Message
 from database import claim_payment_by_client, create_order, list_active_snacks
 from handlers.barista import notify_barista_payment_pending
 from keyboards import (
+    DRINK_CATEGORIES,
     DRINKS,
     PRICES,
     SIZES,
+    SYRUP_PRICE,
+    SYRUPS,
     kb_drink_categories,
     kb_drinks_in_category,
     kb_confirm_order,
@@ -27,6 +30,8 @@ from keyboards import (
     kb_snacks_selection,
     kb_start_panel,
     kb_cart_delete,
+    kb_syrup_choice,
+    kb_syrups,
 )
 from states import OrderStates
 
@@ -96,7 +101,8 @@ def _grouped_cart_lines(items: list[dict]) -> list[str]:
     order_keys: list[str] = []
     for it in items:
         if it.get("kind") == "drink":
-            key = f"d:{it['drink_key']}:{it['size_key']}"
+            syrup = it.get("syrup") or ""
+            key = f"d:{it['drink_key']}:{it['size_key']}:{syrup}"
             label = str(
                 it.get("label")
                 or f"{it.get('drink_name')} ({SIZES.get(it['size_key'], {}).get('label', it['size_key'])})"
@@ -444,12 +450,44 @@ async def choose_drink_category(callback: CallbackQuery, state: FSMContext) -> N
 
     await callback.answer()
     category_key = callback.data.split(":", 1)[1]
+    await state.update_data(drink_category=category_key)
     await state.set_state(OrderStates.waiting_for_drink)
     sent = await callback.message.answer(
         "Выберите напиток:",
         reply_markup=kb_drinks_in_category(category_key),
     )
     await _track_step_message(state, sent)
+
+
+async def _add_pending_drink_to_cart(state: FSMContext, *, syrup: str | None = None) -> None:
+    """Добавляет в корзину напиток из pending_drink (с опциональным сиропом)."""
+    data = await state.get_data()
+    pending = data.get("pending_drink") or {}
+    if not pending:
+        return
+
+    price = int(pending["price"])
+    label = str(pending["label"])
+    if syrup:
+        price += int(SYRUP_PRICE)
+        label = f"{label} + сироп {syrup}"
+
+    uid = await _alloc_uid(state)
+    cart = _get_cart(data)
+    cart.append(
+        {
+            "uid": uid,
+            "kind": "drink",
+            "drink_key": pending["drink_key"],
+            "drink_name": pending["drink_name"],
+            "size_key": pending["size_key"],
+            "size_ml": pending["size_ml"],
+            "price": price,
+            "label": label,
+            "syrup": syrup,
+        }
+    )
+    await state.update_data(cart_items=cart, pending_drink=None)
 
 
 @router.callback_query(F.data.startswith("size:"))
@@ -474,21 +512,72 @@ async def choose_size(callback: CallbackQuery, state: FSMContext) -> None:
     drink_subtotal = PRICES[drink_key][size_key]
     size_label = str(SIZES[size_key]["label"])
     drink_name = str(DRINKS[drink_key])
-    uid = await _alloc_uid(state)
-    cart = _get_cart(await state.get_data())
-    cart.append(
-        {
-            "uid": uid,
-            "kind": "drink",
-            "drink_key": drink_key,
-            "drink_name": drink_name,
-            "size_key": size_key,
-            "size_ml": int(SIZES[size_key]["ml"]),
-            "price": int(drink_subtotal),
-            "label": f"{drink_name} ({size_label})",
-        }
+    pending = {
+        "drink_key": drink_key,
+        "drink_name": drink_name,
+        "size_key": size_key,
+        "size_ml": int(SIZES[size_key]["ml"]),
+        "price": int(drink_subtotal),
+        "label": f"{drink_name} ({size_label})",
+    }
+    await state.update_data(pending_drink=pending)
+
+    coffee_keys = set(DRINK_CATEGORIES.get("coffee", {}).get("drinks") or [])
+    is_coffee = drink_key in coffee_keys or data.get("drink_category") == "coffee"
+
+    if is_coffee:
+        await state.set_state(OrderStates.waiting_for_syrup_choice)
+        sent = await callback.message.answer(
+            f"Добавить сироп к «{drink_name}»? (+{SYRUP_PRICE} тг)",
+            reply_markup=kb_syrup_choice(),
+        )
+        await _track_step_message(state, sent)
+        return
+
+    await _add_pending_drink_to_cart(state, syrup=None)
+    await state.set_state(OrderStates.waiting_for_builder)
+    await _show_builder_menu(callback.message, state)
+
+
+@router.callback_query(F.data == "syrup_yes")
+async def syrup_yes(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != OrderStates.waiting_for_syrup_choice.state:
+        await callback.answer()
+        return
+    await callback.answer()
+    await state.set_state(OrderStates.waiting_for_syrup)
+    sent = await callback.message.answer(
+        f"Выберите сироп (+{SYRUP_PRICE} тг):",
+        reply_markup=kb_syrups(),
     )
-    await state.update_data(cart_items=cart)
+    await _track_step_message(state, sent)
+
+
+@router.callback_query(F.data == "syrup_no")
+async def syrup_no(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != OrderStates.waiting_for_syrup_choice.state:
+        await callback.answer()
+        return
+    await callback.answer()
+    await _add_pending_drink_to_cart(state, syrup=None)
+    await state.set_state(OrderStates.waiting_for_builder)
+    await _show_builder_menu(callback.message, state)
+
+
+@router.callback_query(F.data.startswith("syrup:"))
+async def choose_syrup(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != OrderStates.waiting_for_syrup.state:
+        await callback.answer()
+        return
+    await callback.answer()
+    try:
+        idx = int(callback.data.split(":", 1)[1])
+        syrup_name = SYRUPS[idx]
+    except (IndexError, ValueError):
+        await callback.message.answer("Неизвестный сироп. Попробуйте снова.")
+        return
+
+    await _add_pending_drink_to_cart(state, syrup=syrup_name)
     await state.set_state(OrderStates.waiting_for_builder)
     await _show_builder_menu(callback.message, state)
 

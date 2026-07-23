@@ -194,6 +194,53 @@ def kb_sizes_for_drink(drink_key: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# Сиропы для категории КОФЕ (+100 тг)
+SYRUP_PRICE = 100
+SYRUPS: list[str] = [
+    "Амаретто",
+    "Брауни",
+    "Имбирный пряник",
+    "Карамель",
+    "Ваниль",
+    "Орех",
+    "Попкорн",
+    "Соленая карамель",
+    "Тирамису",
+    "Фисташка",
+    "Шоколад",
+    "Яблочный пирог",
+    "Лаванда",
+    "Дыня",
+    "Груша",
+    "Кокос",
+    "Банан",
+    "Айриш",
+    "Мята",
+]
+
+
+def kb_syrup_choice() -> InlineKeyboardMarkup:
+    """Вопрос: добавить сироп к кофе?"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, +100 тг", callback_data="syrup_yes"),
+                InlineKeyboardButton(text="Нет", callback_data="syrup_no"),
+            ]
+        ]
+    )
+
+
+def kb_syrups() -> InlineKeyboardMarkup:
+    """Список сиропов (по 2 в ряд)."""
+    buttons = [
+        InlineKeyboardButton(text=name, callback_data=f"syrup:{i}")
+        for i, name in enumerate(SYRUPS)
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 # Старые функции оставлены на случай, если где-то остался вызов.
 def kb_drinks() -> InlineKeyboardMarkup:
     buttons: list[InlineKeyboardButton] = [
