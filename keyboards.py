@@ -147,8 +147,7 @@ def kb_order_builder() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Добавить напиток", callback_data="builder_add_coffee")],
-            [InlineKeyboardButton(text="Добавить еду", callback_data="builder_add_food")],
-            [InlineKeyboardButton(text="Удалить позицию", callback_data="builder_delete_food")],
+            [InlineKeyboardButton(text="Удалить позицию", callback_data="builder_delete_item")],
             [InlineKeyboardButton(text="Завершить заказ", callback_data="builder_finish")],
         ]
     )
@@ -305,33 +304,6 @@ def kb_cart_delete(items: list[dict]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="« Назад в конструктор", callback_data="cart_del_cancel")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-
-def kb_snacks_selection(snacks: list[dict], selected_ids: set[int]) -> InlineKeyboardMarkup:
-    """
-    Inline-клавиатура закусок (данные из БД).
-    snacks: элементы вида {"id": int, "name": str, "price": int}
-    """
-    rows: list[list[InlineKeyboardButton]] = []
-    for s in snacks:
-        sid = int(s["id"])
-        mark = "✓ " if sid in selected_ids else ""
-        label = f"{mark}{s['name']} — {s['price']} ₸"
-        rows.append([InlineKeyboardButton(text=label[:64], callback_data=f"snack_toggle:{sid}")])
-    rows.append(
-        [
-            InlineKeyboardButton(text="Далее → подтверждение", callback_data="snacks_done"),
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def kb_snacks_empty_continue() -> InlineKeyboardMarkup:
-    """Когда в витрине нет позиций — сразу к подтверждению."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Продолжить без закусок", callback_data="snacks_done")],
-        ]
-    )
 
 def kb_leave_preparation_comment() -> InlineKeyboardMarkup:
     """Вопрос клиенту: оставить ли комментарий баристе."""

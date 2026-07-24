@@ -12,7 +12,6 @@ class OrderStates(StatesGroup):
     waiting_for_drink_category = State()  # выбор категории напитка
     waiting_for_syrup_choice = State()  # хочет ли сироп к кофе
     waiting_for_syrup = State()  # выбор сиропа
-    waiting_for_snacks = State()  # закуски / выпечка (динамическое меню)
     waiting_for_preparation_comment_choice = State()  # хотим ли комментарий баристе
     waiting_for_preparation_comment_input = State()  # ввод комментария (текст)
     waiting_for_confirmation = State()  # подтверждение заказа (summary)

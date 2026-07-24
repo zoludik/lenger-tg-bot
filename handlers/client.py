@@ -8,7 +8,7 @@ from aiogram.filters import CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, FSInputFile, Message
 
-from database import claim_payment_by_client, create_order, list_active_snacks
+from database import claim_payment_by_client, create_order
 from handlers.barista import notify_barista_payment_pending
 from keyboards import (
     DRINK_CATEGORIES,
@@ -26,8 +26,6 @@ from keyboards import (
     kb_leave_preparation_comment,
     kb_ready_time,
     kb_sizes_for_drink,
-    kb_snacks_empty_continue,
-    kb_snacks_selection,
     kb_start_panel,
     kb_cart_delete,
     kb_syrup_choice,
@@ -47,7 +45,7 @@ WELCOME_TEXT = (
     "Как я работаю:\n"
     "1) Нажмите кнопку «Сделать заказ».\n"
     "2) Выберите время, когда вам удобно забрать заказ (время Астаны, GMT+5).\n"
-    "3) В конструкторе соберите заказ: любое количество напитков и/или еды с витрины.\n"
+    "3) В конструкторе соберите заказ: любое количество напитков.\n"
     "4) В конце получите ссылку для оплаты в Kaspi и нажмите «Я оплатил (Kaspi)».\n\n"
     "После подтверждения оплаты бариста получит ваш заказ и комментарий по приготовлению (если вы его оставите)."
 )
@@ -69,7 +67,13 @@ async def bot_send_menu_photos(*, bot: Bot, chat_id: int, state: FSMContext) -> 
     """Отправляет 2 фото меню и сохраняет их message_id, чтобы потом удалить."""
     p1 = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_1_PATH))
     p2 = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(PREP_PHOTO_2_PATH))
-    await state.update_data(menu_photo_ids=[int(p1.message_id), int(p2.message_id)])
+    data = await state.get_data()
+    ids = list(data.get("chat_cleanup_ids") or [])
+    ids.extend([int(p1.message_id), int(p2.message_id)])
+    await state.update_data(
+        menu_photo_ids=[int(p1.message_id), int(p2.message_id)],
+        chat_cleanup_ids=ids,
+    )
 
 
 def parse_hhmm(text: str) -> str | None:
@@ -100,16 +104,12 @@ def _grouped_cart_lines(items: list[dict]) -> list[str]:
     groups: dict[str, dict] = {}
     order_keys: list[str] = []
     for it in items:
-        if it.get("kind") == "drink":
-            syrup = it.get("syrup") or ""
-            key = f"d:{it['drink_key']}:{it['size_key']}:{syrup}"
-            label = str(
-                it.get("label")
-                or f"{it.get('drink_name')} ({SIZES.get(it['size_key'], {}).get('label', it['size_key'])})"
-            )
-        else:
-            key = f"f:{it.get('snack_id')}"
-            label = str(it.get("name") or "?")
+        syrup = it.get("syrup") or ""
+        key = f"d:{it.get('drink_key')}:{it.get('size_key')}:{syrup}"
+        label = str(
+            it.get("label")
+            or f"{it.get('drink_name')} ({SIZES.get(it.get('size_key'), {}).get('label', it.get('size_key'))})"
+        )
         price = int(it.get("price", 0))
         if key not in groups:
             groups[key] = {"label": label, "qty": 0, "subtotal": 0, "unit": price}
@@ -134,10 +134,19 @@ async def _alloc_uid(state: FSMContext) -> str:
     return str(n)
 
 
+async def _remember_cleanup_id(state: FSMContext, message_id: int) -> None:
+    data = await state.get_data()
+    ids = list(data.get("chat_cleanup_ids") or [])
+    mid = int(message_id)
+    if mid not in ids:
+        ids.append(mid)
+    await state.update_data(chat_cleanup_ids=ids)
+
+
 async def _track_step_message(state: FSMContext, new_msg: Message) -> None:
     """
     Сохраняет id последнего «служебного» сообщения шага и удаляет предыдущее.
-    Не вызывается для фото меню, QR и критичных статусов.
+    Все id копятся для полной очистки чата в конце заказа.
     """
     data = await state.get_data()
     old_id = data.get("step_message_id")
@@ -147,6 +156,16 @@ async def _track_step_message(state: FSMContext, new_msg: Message) -> None:
         except Exception:
             pass
     await state.update_data(step_message_id=int(new_msg.message_id))
+    await _remember_cleanup_id(state, int(new_msg.message_id))
+
+
+async def _cleanup_order_chat(*, bot: Bot, chat_id: int, message_ids: list[int]) -> None:
+    """Удаляет сообщения бота, накопленные за оформление заказа."""
+    for mid in message_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=int(mid))
+        except Exception:
+            pass
 
 
 async def _show_confirmation(*, message: Message | None, chat_id: int, state: FSMContext, bot: Bot) -> None:
@@ -175,53 +194,6 @@ async def _show_confirmation(*, message: Message | None, chat_id: int, state: FS
         sent = await message.answer(text, reply_markup=kb_confirm_order())
     else:
         sent = await bot.send_message(chat_id, text, reply_markup=kb_confirm_order())
-    await _track_step_message(state, sent)
-
-
-async def _open_snacks_menu(anchor: Message, state: FSMContext, mode: str) -> None:
-    """
-    Шаг витрины: динамическое меню из БД (добавляет бариста).
-    mode: 'add' — добавить еду; 'delete' — удалить выбранную еду (через корзину).
-    """
-    data = await state.get_data()
-    cart = _get_cart(data)
-
-    await state.update_data(snacks_mode=mode)
-    await state.set_state(OrderStates.waiting_for_snacks)
-
-    all_snacks = await list_active_snacks()
-    food_ids = {int(x["snack_id"]) for x in cart if x.get("kind") == "food"}
-
-    if mode == "delete":
-        snacks = [s for s in all_snacks if int(s["id"]) in food_ids]
-        if not snacks:
-            await anchor.answer("В заказе пока нет еды, нечего удалять.")
-            await state.set_state(OrderStates.waiting_for_builder)
-            await _show_builder_menu(anchor, state)
-            return
-        text = (
-            "Удалите позиции еды из заказа.\n"
-            "Нажмите на позицию, которую хотите убрать, — затем бот вернёт вас в конструктор.\n\n"
-            f"Сейчас в заказе еды: {sum(1 for x in cart if x.get('kind') == 'food')} шт."
-        )
-    else:
-        snacks = all_snacks
-        if not snacks:
-            await anchor.answer(
-                "Сейчас нет закусок и выпечки на витрине.\nНажмите кнопку ниже, чтобы вернуться к заказу.",
-                reply_markup=kb_snacks_empty_continue(),
-            )
-            return
-        text = (
-            "Добавьте закуски / выпечку: нажмите позицию, чтобы добавить в заказ.\n"
-            "После выбора бот вернёт вас в конструктор.\n\n"
-            f"Уже в заказе еды: {sum(1 for x in cart if x.get('kind') == 'food')} шт."
-        )
-
-    sent = await anchor.answer(
-        text,
-        reply_markup=kb_snacks_selection(snacks, food_ids),
-    )
     await _track_step_message(state, sent)
 
 
@@ -283,9 +255,14 @@ async def order_start(callback: CallbackQuery, state: FSMContext) -> None:
         telegram_username=callback.from_user.username,
         cart_items=[],
         cart_uid_seq=0,
+        chat_cleanup_ids=[],
     )
 
     await callback.answer()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
     sent = await callback.message.answer("Когда будет готово?", reply_markup=kb_ready_time())
     await _track_step_message(state, sent)
 
@@ -304,15 +281,6 @@ async def builder_add_coffee(callback: CallbackQuery, state: FSMContext, bot: Bo
     await _track_step_message(state, sent)
 
 
-@router.callback_query(F.data == "builder_add_food")
-async def builder_add_food(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != OrderStates.waiting_for_builder.state:
-        await callback.answer()
-        return
-    await callback.answer()
-    await _open_snacks_menu(callback.message, state, mode="add")
-
-
 @router.callback_query(F.data == "builder_finish")
 async def builder_finish(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     if await state.get_state() != OrderStates.waiting_for_builder.state:
@@ -321,7 +289,7 @@ async def builder_finish(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     await callback.answer()
     data = await state.get_data()
     if not _get_cart(data):
-        await callback.message.answer("Добавьте хотя бы одну позицию в заказ (напиток или еду).")
+        await callback.message.answer("Добавьте хотя бы один напиток в заказ.")
         return
     await state.set_state(OrderStates.waiting_for_preparation_comment_choice)
     sent = await callback.message.answer(
@@ -331,7 +299,7 @@ async def builder_finish(callback: CallbackQuery, state: FSMContext, bot: Bot) -
     await _track_step_message(state, sent)
 
 
-@router.callback_query(F.data == "builder_delete_food")
+@router.callback_query(F.data == "builder_delete_item")
 async def builder_delete_position(callback: CallbackQuery, state: FSMContext) -> None:
     """Удаление одной позиции из корзины."""
     if await state.get_state() != OrderStates.waiting_for_builder.state:
@@ -648,83 +616,23 @@ async def manual_ready_time_input(message: Message, state: FSMContext, bot: Bot)
     await _show_builder_menu(message, state)
 
 
-@router.callback_query(F.data.startswith("snack_toggle:"))
-async def snack_toggle(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != OrderStates.waiting_for_snacks.state:
-        await callback.answer()
-        return
-
-    try:
-        sid = int(callback.data.split(":", 1)[1])
-    except (IndexError, ValueError):
-        await callback.answer()
-        return
-
-    snacks = await list_active_snacks()
-    item = next((s for s in snacks if s["id"] == sid), None)
-    if not item:
-        await callback.answer("Позиции уже нет на витрине.", show_alert=True)
-        return
-
-    data = await state.get_data()
-    cart = _get_cart(data)
-    mode = (data.get("snacks_mode") or "add").lower()
-
-    if mode == "delete":
-        # Удаляем одну позицию еды с этим id (последнюю добавленную).
-        removed = False
-        new_cart: list[dict] = []
-        for x in reversed(cart):
-            if not removed and x.get("kind") == "food" and int(x.get("snack_id") or 0) == sid:
-                removed = True
-                continue
-            new_cart.append(x)
-        new_cart.reverse()
-        await state.update_data(cart_items=new_cart)
-    else:
-        uid = await _alloc_uid(state)
-        cart.append(
-            {
-                "uid": uid,
-                "kind": "food",
-                "snack_id": int(item["id"]),
-                "name": str(item["name"]),
-                "price": int(item["price"]),
-                "label": str(item["name"]),
-            }
-        )
-        await state.update_data(cart_items=cart)
-
-    # После действия возвращаем клиента в окно конструктора.
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    await state.set_state(OrderStates.waiting_for_builder)
-    await _show_builder_menu(callback.message, state)
-
-
-@router.callback_query(F.data == "snacks_done")
-async def snacks_done(callback: CallbackQuery, state: FSMContext) -> None:
-    if await state.get_state() != OrderStates.waiting_for_snacks.state:
-        await callback.answer()
-        return
-
-    await callback.answer()
-    await state.set_state(OrderStates.waiting_for_builder)
-    await _show_builder_menu(callback.message, state)
-
-
 @router.callback_query(F.data == "cancel")
-async def cancel_order(callback: CallbackQuery, state: FSMContext) -> None:
+async def cancel_order(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     await callback.answer()
+    data = await state.get_data()
+    cleanup_ids = list(data.get("chat_cleanup_ids") or [])
+    if callback.message:
+        cleanup_ids.append(int(callback.message.message_id))
     await state.clear()
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    await callback.message.answer("Заказ отменён. Нажмите кнопку «Начать», чтобы оформить новый.")
+    await _cleanup_order_chat(
+        bot=bot,
+        chat_id=callback.message.chat.id,
+        message_ids=cleanup_ids,
+    )
+    await callback.message.answer(
+        "Заказ отменён. Нажмите кнопку «Начать», чтобы оформить новый.",
+        reply_markup=kb_start_panel(),
+    )
 
 
 @router.callback_query(F.data == "confirm")
@@ -737,17 +645,25 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
     data = await state.get_data()
 
     ready_time = data.get("ready_time")
+    ready_label = data.get("ready_label") or ""
     cart = _get_cart(data)
     preparation_comment = str(data.get("preparation_comment") or "")
     telegram_username = callback.from_user.username
     telegram_user_id = callback.from_user.id
+    cleanup_ids = list(data.get("chat_cleanup_ids") or [])
+    if callback.message:
+        cleanup_ids.append(int(callback.message.message_id))
 
     if not (ready_time and cart):
         await state.clear()
-        await callback.message.answer("Не удалось подтвердить заказ. Попробуйте оформить заново: /start")
+        await callback.message.answer(
+            "Не удалось подтвердить заказ. Нажмите «Начать» и оформите заново.",
+            reply_markup=kb_start_panel(),
+        )
         return
 
     total = _cart_total(cart)
+    lines = _grouped_cart_lines(cart)
 
     order_id = await create_order(
         telegram_user_id=telegram_user_id,
@@ -758,29 +674,35 @@ async def confirm_order(callback: CallbackQuery, state: FSMContext, bot: Bot) ->
         total_price=total,
     )
 
-    menu_photo_ids = list(data.get("menu_photo_ids") or [])
     await state.clear()
-
-    # Удаляем summary и фото меню после завершения заказа.
-    try:
-        await callback.message.delete()
-    except Exception:
-        pass
-    for mid in menu_photo_ids:
-        try:
-            await bot.delete_message(chat_id=callback.message.chat.id, message_id=int(mid))
-        except Exception:
-            pass
+    await _cleanup_order_chat(
+        bot=bot,
+        chat_id=callback.message.chat.id,
+        message_ids=cleanup_ids,
+    )
 
     kaspi_url = (os.getenv("KASPI_PAY_URL") or DEFAULT_KASPI_URL).strip()
     text = (
-        f"Заказ №{order_id}\n"
-        f"Сумма к оплате в Kaspi: {total} ₸\n\n"
+        f"✅ Заказ №{order_id} подтверждён\n\n"
+        f"Состав:\n"
+        + "\n".join(lines)
+        + f"\n\nГотово к: {ready_label} ({ready_time})\n"
+        f"Итого к оплате: {total} ₸\n\n"
         f"Ссылка для оплаты:\n{kaspi_url}\n\n"
-        "Откройте ссылку, введите сумму вручную в приложении Kaspi.\n"
-        "После оплаты нажмите «Я оплатил (Kaspi)» — бариста проверит платёж."
+        "Откройте ссылку, введите сумму вручную в Kaspi.\n"
+        "После оплаты нажмите «Я оплатил (Kaspi)»."
     )
-    await callback.message.answer(text, reply_markup=kb_paid(order_id), disable_web_page_preview=False)
+    await callback.message.answer(text, reply_markup=kb_paid(order_id))
+    # Панель «Начать» для следующего заказа (клавиатура останется и после удаления служебного сообщения).
+    kb_msg = await bot.send_message(
+        chat_id=callback.message.chat.id,
+        text="Для нового заказа нажмите «Начать».",
+        reply_markup=kb_start_panel(),
+    )
+    try:
+        await bot.delete_message(chat_id=callback.message.chat.id, message_id=kb_msg.message_id)
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("paid:"))
